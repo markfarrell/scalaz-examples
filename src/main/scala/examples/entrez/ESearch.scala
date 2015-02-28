@@ -10,6 +10,8 @@ import org.http4s.client.blaze.defaultClient
 import scalaz.\/-
 import scalaz.concurrent.Task
 
+import scalaz.stream._
+
 object ESearch {
 
   // Base URL: send GET requests to retrieve article UIDs
@@ -26,7 +28,7 @@ object ESearch {
 
   // The maximum number of UIDs that we want returned for a request
   // Note: 100000 is the maximum number of UIDs that can be returned in a single request
-  val retmax = 5000
+  val retmax = 100000
 
   // Sort by publication date
   val sort = "pub+date"
@@ -42,12 +44,14 @@ object ESearch {
 
   val client = defaultClient
 
+  // Make a URL before retrieving a list of UIDs for a search term
   def url(term : String) : String = {
     s"""$baseUrl?db=$db&term=${URLEncoder.encode(term, "UTF-8")}&retstart=$retstart""" +
     s"""&rettype=$rettype&retmax=$retmax&sort=$sort&datetype=$datetype&""" +
     s"""mindate=$mindate&maxdate=$maxdate"""
   }
 
+  // Fetch a list of UIDs for a search term
   def request(term : String) : Task[Elem] = {
 
     val task = Task.delay {
@@ -71,13 +75,35 @@ object ESearch {
   // Takes a list of search terms in a file and counts
   // the total number of search results for all of the terms
   // on PubMed.
-  def countAll(file : String) : Option[String] = {
+  def countAll(file : String) : Option[Int] = {
 
-    io.linesR(file)
-      .map(term => Process.eval(count(term)))
+    val p0 = io.linesR(file).map(term => Process.eval(count(term)))
+
+    merge.mergeN(p0)
       .scan(0)(_ + _)
       .runLast
       .run
+
+  }
+
+  // Fetch a list of UIDs for a search term.
+  // Produces a process that emits each UID.
+  def ids(term : String) : Process[Task, String] = {
+
+    val task : Task[Seq[String]]= {
+      request(term)
+        .map(elem => (elem \ "IdList" \ "Id")
+        .map(_.text))
+    }
+
+    def msg(ids : Seq[String]) : String = {
+      s"Retrieved ${ids.length} UIDs for search term '$term'."
+    }
+
+    Process.eval(task)
+      .flatMap(ids => Process.tell(msg(ids)) ++ Process.emitO(ids))
+      .drainW(io.stdOutLines)
+      .pipe(process1.unchunk)
 
   }
 
